@@ -1,0 +1,96 @@
+import pyodbc
+import graphviz
+
+# Connect to the SQL Server database using Windows Authentication
+def connect_to_sql_server(server, database):
+    connection_string = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={database};Trusted_Connection=yes;"
+    connection = pyodbc.connect(connection_string)
+    return connection
+
+# Fetch table and column information from the database
+def fetch_schema(connection):
+    cursor = connection.cursor()
+    
+    # Get tables
+    cursor.execute("""
+        SELECT TABLE_NAME
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_CATALOG = ?
+    """, (connection.database,))
+    
+    tables = cursor.fetchall()
+    
+    # Get columns and foreign keys
+    schema = {}
+    for table in tables:
+        table_name = table.TABLE_NAME
+        cursor.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = ?
+        """, (table_name,))
+        columns = cursor.fetchall()
+        
+        cursor.execute("""
+            SELECT
+                KCU1.CONSTRAINT_NAME AS FK_CONSTRAINT_NAME
+                ,KCU1.TABLE_NAME AS FK_TABLE_NAME
+                ,KCU1.COLUMN_NAME AS FK_COLUMN_NAME
+                ,KCU2.CONSTRAINT_NAME AS REFERENCED_CONSTRAINT_NAME
+                ,KCU2.TABLE_NAME AS REFERENCED_TABLE_NAME
+                ,KCU2.COLUMN_NAME AS REFERENCED_COLUMN_NAME
+            FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS AS RC
+
+            INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS KCU1
+                ON KCU1.CONSTRAINT_CATALOG = RC.CONSTRAINT_CATALOG
+                AND KCU1.CONSTRAINT_SCHEMA = RC.CONSTRAINT_SCHEMA
+                AND KCU1.CONSTRAINT_NAME = RC.CONSTRAINT_NAME
+
+            INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS KCU2
+                ON KCU2.CONSTRAINT_CATALOG = RC.UNIQUE_CONSTRAINT_CATALOG
+                AND KCU2.CONSTRAINT_SCHEMA = RC.UNIQUE_CONSTRAINT_SCHEMA
+                AND KCU2.CONSTRAINT_NAME = RC.UNIQUE_CONSTRAINT_NAME
+                AND KCU2.ORDINAL_POSITION = KCU1.ORDINAL_POSITION
+            WHERE KCU1.TABLE_NAME = ?
+        """, (table_name,))
+        foreign_keys = cursor.fetchall()
+        
+        schema[table_name] = {
+            "columns": columns,
+            "foreign_keys": foreign_keys
+        }
+    
+    return schema
+
+# Create a Graphviz graph from the schema
+def create_graph(schema):
+    dot = graphviz.Digraph(comment='Database Schema')
+    
+    for table_name, details in schema.items():
+        with dot.subgraph(name=f'cluster_{table_name}') as c:
+            c.node(table_name, shape='box')
+            for column in details['columns']:
+                c.node(f'{table_name}.{column.COLUMN_NAME}', label=f'{column.COLUMN_NAME} : {column.DATA_TYPE}')
+                c.edge(table_name, f'{table_name}.{column.COLUMN_NAME}', arrowhead='none')
+    
+    for table_name, details in schema.items():
+        for fk in details['foreign_keys']:
+            dot.edge(f'{fk.FK_TABLE_NAME}.{fk.FK_COLUMN_NAME}', f'{fk.REFERENCED_TABLE_NAME}.{fk.REFERENCED_COLUMN_NAME}', constraint='true')
+    
+    return dot
+
+# Main function to connect, fetch schema and create graph
+def main():
+    server = 'your_server'
+    database = 'your_database'
+    
+    connection = connect_to_sql_server(server, database)
+    schema = fetch_schema(connection)
+    graph = create_graph(schema)
+    
+    # Render the graph to a file
+    graph.render('database_schema', format='png', cleanup=True)
+    print("Database schema graph has been created and saved as 'database_schema.png'.")
+
+if __name__ == "__main__":
+    main()
